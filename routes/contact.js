@@ -5,6 +5,12 @@ const { adminAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
+<<<<<<< HEAD
+=======
+// Mock contact methods data (in a real app, this would be stored in database)
+let contactMethods = [];
+
+>>>>>>> origin/main
 // @route   GET /api/contact
 // @desc    Get all contact methods with dynamic sorting
 // @access  Public
