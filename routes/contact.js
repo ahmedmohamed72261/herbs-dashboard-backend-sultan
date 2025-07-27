@@ -1,88 +1,55 @@
 const express = require('express');
-const { body, validationResult } = require('express-validator');
+const { body, validationResult, query } = require('express-validator');
+const Contact = require('../models/Contact');
 const { adminAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Mock contact methods data (in a real app, this would be stored in database)
-let contactMethods = [
-  {
-    id: 1,
-    type: 'phone',
-    label: 'Phone',
-    value: '+1 (555) 123-4567',
-    description: 'Call us during business hours',
-    isActive: true,
-    order: 1
-  },
-  {
-    id: 2,
-    type: 'whatsapp',
-    label: 'WhatsApp',
-    value: '+1 (555) 123-4567',
-    description: 'Message us on WhatsApp',
-    isActive: true,
-    order: 2
-  },
-  {
-    id: 3,
-    type: 'email',
-    label: 'Email',
-    value: 'info@herbs.com',
-    description: 'Send us an email',
-    isActive: true,
-    order: 3
-  },
-  {
-    id: 4,
-    type: 'address',
-    label: 'Address',
-    value: '123 Herbs Street, Natural City, NC 12345',
-    description: 'Visit our store',
-    isActive: true,
-    order: 4
-  },
-  {
-    id: 5,
-    type: 'website',
-    label: 'Website',
-    value: 'https://herbs.com',
-    description: 'Visit our website',
-    isActive: true,
-    order: 5
-  },
-  {
-    id: 6,
-    type: 'social',
-    label: 'Facebook',
-    value: 'https://facebook.com/herbs',
-    description: 'Follow us on Facebook',
-    isActive: true,
-    order: 6
-  }
-];
-
 // @route   GET /api/contact
-// @desc    Get all contact methods
+// @desc    Get all contact methods with dynamic sorting
 // @access  Public
-router.get('/', async (req, res) => {
+router.get('/', [
+  query('sortBy').optional().isIn(['type', 'label', 'createdAt']).withMessage('Invalid sort field'),
+  query('sortOrder').optional().isIn(['asc', 'desc']).withMessage('Sort order must be asc or desc')
+], async (req, res) => {
   try {
-    const { isActive } = req.query;
-    
-    let filteredMethods = contactMethods;
-    
-    if (isActive !== undefined) {
-      filteredMethods = contactMethods.filter(method => 
-        method.isActive === (isActive === 'true')
-      );
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation failed',
+        errors: errors.array()
+      });
     }
+
+    const { sortBy, sortOrder } = req.query;
     
-    // Sort by order
-    filteredMethods.sort((a, b) => a.order - b.order);
+    // Build filter object
+    let filter = {};
+    
+    // Exclude website and social media types
+    const excludedTypes = Contact.getExcludedTypes();
+    filter.type = { $nin: excludedTypes };
+    
+    // Build sort object
+    let sortObj = {};
+    if (sortBy) {
+      sortObj[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    } else {
+      sortObj = { createdAt: -1 }; // Default sort by creation date descending
+    }
+
+    // Get contacts with filtering and sorting
+    const contacts = await Contact.find(filter).sort(sortObj);
 
     res.json({
       success: true,
-      data: filteredMethods
+      data: contacts,
+      meta: {
+        total: contacts.length,
+        sortBy: sortBy || 'createdAt',
+        sortOrder: sortOrder || 'desc'
+      }
     });
 
   } catch (error) {
@@ -99,9 +66,9 @@ router.get('/', async (req, res) => {
 // @access  Public
 router.get('/:id', async (req, res) => {
   try {
-    const contactMethod = contactMethods.find(method => method.id === parseInt(req.params.id));
+    const contact = await Contact.findById(req.params.id);
     
-    if (!contactMethod) {
+    if (!contact) {
       return res.status(404).json({
         success: false,
         message: 'Contact method not found'
@@ -110,11 +77,19 @@ router.get('/:id', async (req, res) => {
 
     res.json({
       success: true,
-      data: contactMethod
+      data: contact
     });
 
   } catch (error) {
     console.error('Get contact method error:', error);
+    
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid contact ID'
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: 'Server error while fetching contact method'
@@ -130,7 +105,14 @@ router.post('/', [
   body('type')
     .trim()
     .isLength({ min: 1, max: 50 })
-    .withMessage('Type must be between 1 and 50 characters'),
+    .withMessage('Type must be between 1 and 50 characters')
+    .custom(value => {
+      const excludedTypes = Contact.getExcludedTypes();
+      if (excludedTypes.includes(value.toLowerCase())) {
+        throw new Error('Website and social media contact types are not allowed');
+      }
+      return true;
+    }),
   body('label')
     .trim()
     .isLength({ min: 1, max: 100 })
@@ -139,15 +121,11 @@ router.post('/', [
     .trim()
     .isLength({ min: 1, max: 500 })
     .withMessage('Value must be between 1 and 500 characters'),
-  body('description')
+  body('icon')
     .optional()
     .trim()
-    .isLength({ max: 200 })
-    .withMessage('Description cannot exceed 200 characters'),
-  body('order')
-    .optional()
-    .isInt({ min: 1 })
-    .withMessage('Order must be a positive integer')
+    .isLength({ max: 50 })
+    .withMessage('Icon name cannot exceed 50 characters')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -159,31 +137,37 @@ router.post('/', [
       });
     }
 
-    const { type, label, value, description, isActive, order } = req.body;
+    const { type, label, value, icon } = req.body;
 
-    // Generate new ID
-    const newId = Math.max(...contactMethods.map(m => m.id), 0) + 1;
-
-    const newContactMethod = {
-      id: newId,
+    const contactData = {
       type,
       label,
-      value,
-      description: description || '',
-      isActive: isActive !== undefined ? isActive : true,
-      order: order || newId
+      value
     };
 
-    contactMethods.push(newContactMethod);
+    // Add optional fields
+    if (icon) contactData.icon = icon;
+
+    const contact = new Contact(contactData);
+    await contact.save();
 
     res.status(201).json({
       success: true,
       message: 'Contact method created successfully',
-      data: newContactMethod
+      data: contact
     });
 
   } catch (error) {
     console.error('Create contact method error:', error);
+    
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation error',
+        errors: Object.values(error.errors).map(err => err.message)
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: 'Server error while creating contact method'
@@ -200,7 +184,16 @@ router.put('/:id', [
     .optional()
     .trim()
     .isLength({ min: 1, max: 50 })
-    .withMessage('Type must be between 1 and 50 characters'),
+    .withMessage('Type must be between 1 and 50 characters')
+    .custom(value => {
+      if (value) {
+        const excludedTypes = Contact.getExcludedTypes();
+        if (excludedTypes.includes(value.toLowerCase())) {
+          throw new Error('Website and social media contact types are not allowed');
+        }
+      }
+      return true;
+    }),
   body('label')
     .optional()
     .trim()
@@ -211,15 +204,11 @@ router.put('/:id', [
     .trim()
     .isLength({ min: 1, max: 500 })
     .withMessage('Value must be between 1 and 500 characters'),
-  body('description')
+  body('icon')
     .optional()
     .trim()
-    .isLength({ max: 200 })
-    .withMessage('Description cannot exceed 200 characters'),
-  body('order')
-    .optional()
-    .isInt({ min: 1 })
-    .withMessage('Order must be a positive integer')
+    .isLength({ max: 50 })
+    .withMessage('Icon name cannot exceed 50 characters')
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -231,33 +220,49 @@ router.put('/:id', [
       });
     }
 
-    const contactMethodIndex = contactMethods.findIndex(method => method.id === parseInt(req.params.id));
+    const contact = await Contact.findById(req.params.id);
     
-    if (contactMethodIndex === -1) {
+    if (!contact) {
       return res.status(404).json({
         success: false,
         message: 'Contact method not found'
       });
     }
 
-    const { type, label, value, description, isActive, order } = req.body;
+    const { type, label, value, icon } = req.body;
 
     // Update fields
-    if (type) contactMethods[contactMethodIndex].type = type;
-    if (label) contactMethods[contactMethodIndex].label = label;
-    if (value) contactMethods[contactMethodIndex].value = value;
-    if (description !== undefined) contactMethods[contactMethodIndex].description = description;
-    if (isActive !== undefined) contactMethods[contactMethodIndex].isActive = isActive;
-    if (order) contactMethods[contactMethodIndex].order = order;
+    if (type) contact.type = type;
+    if (label) contact.label = label;
+    if (value) contact.value = value;
+    if (icon !== undefined) contact.icon = icon;
+
+    await contact.save();
 
     res.json({
       success: true,
       message: 'Contact method updated successfully',
-      data: contactMethods[contactMethodIndex]
+      data: contact
     });
 
   } catch (error) {
     console.error('Update contact method error:', error);
+    
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid contact ID'
+      });
+    }
+
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation error',
+        errors: Object.values(error.errors).map(err => err.message)
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: 'Server error while updating contact method'
@@ -270,16 +275,16 @@ router.put('/:id', [
 // @access  Private (Admin)
 router.delete('/:id', adminAuth, async (req, res) => {
   try {
-    const contactMethodIndex = contactMethods.findIndex(method => method.id === parseInt(req.params.id));
+    const contact = await Contact.findById(req.params.id);
     
-    if (contactMethodIndex === -1) {
+    if (!contact) {
       return res.status(404).json({
         success: false,
         message: 'Contact method not found'
       });
     }
 
-    contactMethods.splice(contactMethodIndex, 1);
+    await Contact.findByIdAndDelete(req.params.id);
 
     res.json({
       success: true,
@@ -288,6 +293,14 @@ router.delete('/:id', adminAuth, async (req, res) => {
 
   } catch (error) {
     console.error('Delete contact method error:', error);
+    
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid contact ID'
+      });
+    }
+
     res.status(500).json({
       success: false,
       message: 'Server error while deleting contact method'
@@ -295,88 +308,6 @@ router.delete('/:id', adminAuth, async (req, res) => {
   }
 });
 
-// @route   PUT /api/contact/:id/toggle
-// @desc    Toggle contact method active status
-// @access  Private (Admin)
-router.put('/:id/toggle', adminAuth, async (req, res) => {
-  try {
-    const contactMethodIndex = contactMethods.findIndex(method => method.id === parseInt(req.params.id));
-    
-    if (contactMethodIndex === -1) {
-      return res.status(404).json({
-        success: false,
-        message: 'Contact method not found'
-      });
-    }
 
-    contactMethods[contactMethodIndex].isActive = !contactMethods[contactMethodIndex].isActive;
-
-    res.json({
-      success: true,
-      message: `Contact method ${contactMethods[contactMethodIndex].isActive ? 'activated' : 'deactivated'} successfully`,
-      data: contactMethods[contactMethodIndex]
-    });
-
-  } catch (error) {
-    console.error('Toggle contact method error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while toggling contact method'
-    });
-  }
-});
-
-// @route   PUT /api/contact/reorder
-// @desc    Reorder contact methods
-// @access  Private (Admin)
-router.put('/reorder', [
-  adminAuth,
-  body('orders')
-    .isArray()
-    .withMessage('Orders must be an array'),
-  body('orders.*.id')
-    .isInt()
-    .withMessage('Each order item must have a valid ID'),
-  body('orders.*.order')
-    .isInt({ min: 1 })
-    .withMessage('Each order item must have a valid order number')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
-    }
-
-    const { orders } = req.body;
-
-    // Update order for each contact method
-    orders.forEach(orderItem => {
-      const contactMethodIndex = contactMethods.findIndex(method => method.id === orderItem.id);
-      if (contactMethodIndex !== -1) {
-        contactMethods[contactMethodIndex].order = orderItem.order;
-      }
-    });
-
-    // Sort by new order
-    contactMethods.sort((a, b) => a.order - b.order);
-
-    res.json({
-      success: true,
-      message: 'Contact methods reordered successfully',
-      data: contactMethods
-    });
-
-  } catch (error) {
-    console.error('Reorder contact methods error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error while reordering contact methods'
-    });
-  }
-});
 
 module.exports = router;
